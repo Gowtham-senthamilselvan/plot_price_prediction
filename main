@@ -1,0 +1,110 @@
+import os
+import torch
+import torch.nn as nn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+
+# Neural Network Model
+class PlotPriceModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(2, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1)
+        )
+
+    def forward(self, x):
+        return self.network(x)
+
+
+# ── Load model ────────────────────────────────────────────────────────────────
+
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "model.pth")
+
+if not os.path.exists(MODEL_PATH):
+    raise FileNotFoundError(f"model.pth not found at: {MODEL_PATH}. Run train_model.py first.")
+
+if os.path.getsize(MODEL_PATH) == 0:
+    raise ValueError(f"model.pth is empty. Run train_model.py again.")
+
+# Load model
+try:
+    model = PlotPriceModel()
+    model.load_state_dict(torch.load(MODEL_PATH, weights_only=True))
+    model.eval()
+    MODEL_LOADED = True
+    print("✅ Model loaded!")
+except:
+    MODEL_LOADED = False
+    print("❌ Need model.pth")
+
+
+# Rates reference
+def get_area_type(score: float) -> tuple[str, int]:
+    if score >= 8.0:
+        return "Main Area", 7000
+    elif score >= 5.0:
+        return "Middle Area", 4000
+    else:
+        return "Interior Area", 1500
+
+
+def format_price(price_lakh: float) -> str:
+    if price_lakh >= 100:
+        return f"₹{price_lakh / 100:.2f} Crore"
+    return f"₹{price_lakh:.2f} Lakh"
+
+
+# FastAPI
+app = FastAPI(title="🌍 Plot Price API (Neural Net)")
+
+
+class PlotData(BaseModel):
+    sqft: float
+    location_score: float
+
+
+@app.get("/")
+def root():
+    return {
+        "status": "running",
+        "model": "loaded" if MODEL_LOADED else "missing model.pth",
+        "test": "POST /predict {'sqft':1000, 'location_score':9.0}",
+        "docs": "/docs"
+    }
+
+
+@app.post("/predict")
+def predict(data: PlotData):
+    if data.sqft <= 0 or not (1 <= data.location_score <= 10):
+        raise HTTPException(422, "Invalid input")
+    if not MODEL_LOADED:
+        raise HTTPException(503, "Run train_model.py first!")
+
+    with torch.no_grad():
+        t = torch.tensor([[data.sqft, data.location_score]], dtype=torch.float32)
+        price_lakh = max(model(t).item(), 0)
+
+    area, rate = get_area_type(data.location_score)
+    expected = (data.sqft * rate) / 100000
+
+    return {
+        "area_type": area,
+        "predicted_price": format_price(price_lakh),
+        "price_lakh": round(price_lakh, 2),
+        "expected_lakh": round(expected, 2),
+        "input": {"sqft": data.sqft, "score": data.location_score}
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
